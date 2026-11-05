@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Réseau du siège Delta Réplique (Rennes) · Documentation · Evan Le Manchec</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;900&family=Rajdhani:wght@500;700&family=Share+Tech+Mono&display=swap">
+<link rel="stylesheet" href="style.css"></head><body>
+<header class="top"><div class="wrap"><a href="../">← Portfolio</a><a href="./">Toute la documentation</a></div></header>
+<main class="wrap">
+<section class="hero"><p class="kicker">Réalisation en formation · 2e année</p><h1>Réseau du siège Delta Réplique (Rennes)</h1><p class="lead">Segmentation en 11 VLAN, routage, DHCP et filtrage par un pare-feu FortiGate, avec switch cœur et Wi-Fi Cisco.</p><div class="meta"><span class="chip c">Octobre 2026</span></div></section>
+
+<h2>Contexte</h2><p>Delta Réplique est une entreprise fictive d’airsoft : un siège à Rennes (avec atelier technique), quatre boutiques en Bretagne et un terrain de jeu. J’ai monté en TP le réseau du siège.</p>
+<div class="grid">
+<div class="card"><h3>Pare-feu FortiGate 100D · FW-RENNES</h3><p>Routage inter-VLAN, DHCP, filtrage et NAT vers Internet. Configuré en CLI (console série 9600 8N1 avec MobaXterm, puis SSH).</p></div>
+<div class="card"><h3>Switch cœur Cisco · SW-CORE</h3><p>Relié au port <code>dmz</code> du FortiGate par un trunk 802.1Q, VLAN 10 à 120 tagués.</p></div>
+<div class="card"><h3>Borne Wi-Fi Cisco</h3><p>Passée en mode Mobility Express : Wi-Fi personnel (VLAN 110) et Wi-Fi invités (VLAN 120).</p></div></div>
+<h2>Plan d’adressage</h2><p>Un réseau /24 par VLAN dans <code>10.30.0.0/16</code>. Passerelle toujours en <code>.1</code> sur le FortiGate, DHCP de <code>.100</code> à <code>.199</code>.</p>
+<table><tr><th>VLAN</th><th>Nom</th><th>Réseau</th><th>Adressage</th></tr><tr><td>10</td><td>Gestion</td><td>10.30.10.0/24</td><td>IP fixes</td></tr><tr><td>20</td><td>Serveurs</td><td>10.30.20.0/24</td><td>IP fixes</td></tr><tr><td>30</td><td>Direction</td><td>10.30.30.0/24</td><td>DHCP</td></tr><tr><td>40</td><td>Ressources humaines</td><td>10.30.40.0/24</td><td>DHCP</td></tr><tr><td>50</td><td>Services administratifs</td><td>10.30.50.0/24</td><td>DHCP</td></tr><tr><td>60</td><td>Sauvegarde</td><td>10.30.60.0/24</td><td>IP fixes</td></tr><tr><td>80</td><td>Informatique</td><td>10.30.80.0/24</td><td>DHCP</td></tr><tr><td>90</td><td>Atelier technique</td><td>10.30.90.0/24</td><td>DHCP</td></tr><tr><td>100</td><td>Boutique de Rennes</td><td>10.30.100.0/24</td><td>DHCP</td></tr><tr><td>110</td><td>Wi-Fi personnel</td><td>10.30.110.0/24</td><td>DHCP</td></tr><tr><td>120</td><td>Wi-Fi invités</td><td>10.30.120.0/24</td><td>DHCP</td></tr></table>
+<h2>Interfaces du FortiGate</h2>
+<table><tr><th>Port</th><th>Alias</th><th>Rôle</th></tr>
+<tr><td>wan1</td><td>WAN-BOX</td><td>Accès Internet (adresse fournie par la box)</td></tr>
+<tr><td>dmz</td><td>TRUNK-SW-CORE</td><td>Support des 11 sous-interfaces VLAN</td></tr>
+<tr><td>mgmt</td><td>ADMIN-SECOURS</td><td>Administration de secours, 10.30.254.1/24</td></tr></table>
+<pre><code>config system interface
+    edit "VL30-DIRECTION"
+        set interface "dmz"
+        set vlanid 30
+        set ip 10.30.30.1 255.255.255.0
+        set allowaccess ping
+        set role lan
+    next
+end</code></pre>
+<h2>Règles de pare-feu</h2><p>Tout ce qui n’est pas autorisé est bloqué : les services ne se voient pas entre eux, seul le VLAN Informatique administre le réseau, et les invités n’ont accès qu’au Web. Toutes les règles journalisent le trafic.</p>
+<table><tr><th>N°</th><th>Nom</th><th>Source</th><th>Destination</th><th>Services</th></tr><tr><td>1</td><td>POSTES-vers-INTERNET</td><td>VLAN 30, 40, 50, 80, 90, 100, 110</td><td>Internet</td><td>Tous</td></tr><tr><td>2</td><td>INVITES-vers-INTERNET</td><td>VLAN 120</td><td>Internet</td><td>DNS, HTTP, HTTPS</td></tr><tr><td>3</td><td>POSTES-vers-SERVEURS</td><td>VLAN 30, 40, 50, 90, 100, 110</td><td>VLAN 20</td><td>DNS, LDAP, Kerberos, SMB, HTTP(S), Ping</td></tr><tr><td>4</td><td>INFO-ADMINISTRATION-TOTALE</td><td>VLAN 80</td><td>Tous sauf 120</td><td>Tous</td></tr><tr><td>5</td><td>SERVEURS-vers-INTERNET</td><td>VLAN 20</td><td>Internet</td><td>DNS, HTTP, HTTPS, NTP</td></tr><tr><td>6</td><td>VEEAM-vers-NAS</td><td>Serveur de sauvegarde</td><td>VLAN 60</td><td>SMB, Ping</td></tr></table>
+<h2>Sécurisation de l’administration</h2><ul><li>Accès HTTPS et SSH ouverts seulement sur les VLAN 10 et 80.</li><li>Compte admin limité à deux réseaux de confiance (<code>trusthost</code>) : VLAN 80 et port mgmt.</li><li>Déconnexion automatique après 15 minutes d’inactivité, redirection HTTP vers HTTPS.</li></ul>
+<h2>Vérifications</h2>
+<table><tr><th>Commande</th><th>Ce qu’elle montre</th></tr>
+<tr><td><code>show system interface</code></td><td>Les 11 VLAN et leurs adresses</td></tr>
+<tr><td><code>execute dhcp lease-list</code></td><td>Les baux DHCP distribués</td></tr>
+<tr><td><code>get router info routing-table all</code></td><td>La route par défaut</td></tr>
+<tr><td><code>diagnose sniffer packet any 'icmp' 4</code></td><td>Les pings qui traversent le pare-feu</td></tr></table>
+<p>Tests fonctionnels : un poste de chaque VLAN reçoit une adresse, la Direction accède à Internet mais ne peut pas pinguer un poste RH, un invité navigue sur le Web sans joindre les serveurs.</p>
+<div class="todo"><b>À compléter</b>Ajoute la configuration du switch SW-CORE, celle de la borne Wi-Fi, et les captures de tes tests.</div>
+<h2>Compétences du bloc 1</h2><div class="comp"><span>Gérer le patrimoine informatique</span><span>Travailler en mode projet</span><span>Mettre à disposition un service informatique</span></div>
+</main>
+<footer><div class="wrap">Evan Le Manchec · BTS SIO option SISR · Aftec Rennes · Épreuve E5</div></footer>
+</body></html>

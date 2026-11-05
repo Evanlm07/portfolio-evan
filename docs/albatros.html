@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Déploiement du mini-SI de la PME Albatros · Documentation · Evan Le Manchec</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;900&family=Rajdhani:wght@500;700&family=Share+Tech+Mono&display=swap">
+<link rel="stylesheet" href="style.css"></head><body>
+<header class="top"><div class="wrap"><a href="../">← Portfolio</a><a href="./">Toute la documentation</a></div></header>
+<main class="wrap">
+<section class="hero"><p class="kicker">Réalisation en formation · 2e année</p><h1>Déploiement du mini-SI de la PME Albatros</h1><p class="lead">Déploiement complet du système d’information d’une PME fictive : annuaire, proxy, inventaire, supervision, journaux et sauvegardes.</p><div class="meta"><span class="chip c">Du 07/10/26 au 08/10/26</span></div></section>
+
+<h2>Architecture</h2>
+<p>Trois machines virtuelles sous VMware, sur le réseau <code>192.168.205.0/24</code> (passerelle <code>.2</code>).</p>
+<table><tr><th>Machine</th><th>Système</th><th>Adresse</th><th>Rôle</th></tr>
+<tr><td>SRV-DC01</td><td>Windows Server 2025</td><td>192.168.205.10</td><td>Active Directory <code>albatros.local</code>, DNS, GPO</td></tr>
+<tr><td>SRV-LNX01</td><td>Ubuntu Server 22.04</td><td>192.168.205.20</td><td>Docker : Squid, GLPI, Zabbix, Grafana/Loki, MinIO + restic</td></tr>
+<tr><td>WKS-01</td><td>Windows 11 Pro</td><td>DHCP</td><td>Poste client joint au domaine</td></tr></table>
+<h2>Services déployés</h2>
+<table><tr><th>Service</th><th>Accès</th><th>Rôle</th></tr>
+<tr><td>Squid</td><td>:3128</td><td>Proxy web imposé aux postes par GPO</td></tr>
+<tr><td>GLPI + LDAP</td><td>:8080</td><td>Inventaire et tickets, comptes de l’annuaire</td></tr>
+<tr><td>Zabbix</td><td>:8081</td><td>Supervision des serveurs (agents)</td></tr>
+<tr><td>Grafana + Loki + Promtail</td><td>:3000</td><td>Centralisation des journaux (conteneurs, Squid)</td></tr>
+<tr><td>MinIO + restic</td><td>:9001</td><td>Sauvegardes chiffrées, planifiées par cron</td></tr></table>
+<h2>1. Annuaire et GPO (SRV-DC01)</h2>
+<p>Scripts PowerShell lancés dans l’ordre : préparation (IP fixe, rôles AD DS et DNS), promotion en contrôleur de domaine, puis création de l’annuaire : OU <code>ALBATROS</code> (Utilisateurs, Ordinateurs, Groupes), comptes <code>ibra</code>, <code>pao</code>, <code>sam</code>, groupe <code>GG-IT</code> et GPO <code>GPO-Proxy-Standard</code>.</p>
+<pre><code># GPO proxy liée à l'OU Ordinateurs
+New-GPLink -Name 'GPO-Proxy-Standard' -Target "OU=Ordinateurs,OU=ALBATROS,DC=albatros,DC=local"
+$is = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+Set-GPRegistryValue -Name 'GPO-Proxy-Standard' -Key $is -ValueName ProxyEnable -Type DWord  -Value 1
+Set-GPRegistryValue -Name 'GPO-Proxy-Standard' -Key $is -ValueName ProxyServer -Type String -Value '192.168.205.20:3128'
+# empêcher l'utilisateur de modifier le proxy
+Set-GPRegistryValue -Name 'GPO-Proxy-Standard' -Key 'HKLM\Software\Policies\Microsoft\Internet Explorer\Control Panel' -ValueName Proxy -Type DWord -Value 1
+# bouclage : la partie Utilisateur s'applique via l'OU des ordinateurs
+Set-GPRegistryValue -Name 'GPO-Proxy-Standard' -Key 'HKLM\Software\Policies\Microsoft\Windows\System' -ValueName UserPolicyMode -Type DWord -Value 1</code></pre>
+<h2>2. Services Linux (SRV-LNX01)</h2>
+<p>Un script <code>install.sh</code> fixe l’adresse IP (netplan), installe Docker et restic, puis démarre chaque pile avec <code>docker compose up -d</code>.</p>
+<pre><code># squid.conf : seuls le réseau local et les réseaux Docker passent
+acl localnet       src 192.168.205.0/24
+acl docker_bridges src 172.16.0.0/12
+http_access allow localnet
+http_access allow docker_bridges
+http_access deny all</code></pre>
+<h2>3. Sauvegarde et restauration (PRA)</h2>
+<p>restic sauvegarde la base et les fichiers de GLPI dans un bucket MinIO, chaque nuit à 2 h (cron). Rétention : 7 sauvegardes quotidiennes et 4 hebdomadaires.</p>
+<pre><code># restic-glpi.sh (extrait)
+docker compose -f "$STACK/docker-compose.yml" stop
+trap 'docker compose -f "$STACK/docker-compose.yml" start' EXIT
+restic backup --tag glpi /var/lib/docker/volumes/glpi_dbdata/_data /var/lib/docker/volumes/glpi_glpidata/_data
+restic forget --tag glpi --keep-daily 7 --keep-weekly 4 --prune</code></pre>
+<p>La restauration est testée : un script simule une corruption de la base GLPI (incident n°2), puis <code>restore-glpi.sh</code> restaure le dernier instantané et mesure le temps de remise en service (RTO).</p>
+<pre><code># restore-glpi.sh (extrait)
+T0=$(date +%s)
+restic restore latest --tag glpi --target /
+docker compose -f "$STACK/docker-compose.yml" start
+until curl -fsS -o /dev/null http://127.0.0.1:8080/; do sleep 2; done
+echo "GLPI de nouveau en ligne. RTO mesuré : $(( $(date +%s) - T0 )) s"</code></pre>
+<div class="todo"><b>À compléter</b>Ajoute le RTO mesuré, les captures (GPMC, GLPI, tableau de bord Zabbix, Grafana) et les fiches des 3 incidents.</div>
+<h2>Écarts par rapport à l’énoncé</h2>
+<ul><li>Réglages du proxy posés en valeurs de registre, avec bouclage de GPO.</li>
+<li>Agent Zabbix ouvert aussi au réseau Docker (172.16.0.0/12), sinon le serveur en conteneur est refusé.</li>
+<li>Sauvegardes planifiées par cron système.</li></ul>
+<p style="color:var(--muted)">Les mots de passe et clés ne sont pas publiés sur cette page.</p>
+
+<h2>Compétences du bloc 1</h2><div class="comp"><span>Gérer le patrimoine informatique</span><span>Répondre aux incidents et aux demandes d’assistance</span><span>Travailler en mode projet</span><span>Mettre à disposition un service informatique</span></div>
+</main>
+<footer><div class="wrap">Evan Le Manchec · BTS SIO option SISR · Aftec Rennes · Épreuve E5</div></footer>
+</body></html>
